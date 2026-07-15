@@ -38,18 +38,69 @@ CARD_WIDTH = 1200
 CARD_HEIGHT = 675
 AVATAR_SIZE = 675  # avatar takes the left square, text sits on the right
 
-# --- Fix 2: nicer display font, with a safe fallback if the .ttf files
-# aren't present next to the script -------------------------------------
+# --- Fix 2 (revised): nicer display font, with a MUCH more robust
+# fallback chain. The previous version only checked one Linux path for
+# DejaVu, so on Windows/Mac (or any host without that exact path) it
+# silently fell through to ImageFont.load_default() — a tiny, fixed
+# ~10px bitmap font that ignores the size you ask for. That's what
+# caused the quote card to render with barely-visible text: it wasn't
+# actually a wrapping/centering bug, the font itself was never loaded.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(SCRIPT_DIR, "Poppins-SemiBold.ttf")
-FONT_REGULAR = os.path.join(SCRIPT_DIR, "Poppins-Regular.ttf")
 
-if not os.path.exists(FONT_PATH):
-    FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-if not os.path.exists(FONT_REGULAR):
-    FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+# Every place we'll look for a real, scalable .ttf, in priority order.
+BOLD_FONT_CANDIDATES = [
+    os.path.join(SCRIPT_DIR, "Poppins-SemiBold.ttf"),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",              # Linux
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",       # Linux
+    "/Library/Fonts/Arial Bold.ttf",                                     # macOS
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",                 # macOS
+    "C:\\Windows\\Fonts\\arialbd.ttf",                                   # Windows
+]
+REGULAR_FONT_CANDIDATES = [
+    os.path.join(SCRIPT_DIR, "Poppins-Regular.ttf"),
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                   # Linux
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",    # Linux
+    "/Library/Fonts/Arial.ttf",                                          # macOS
+    "/System/Library/Fonts/Supplemental/Arial.ttf",                      # macOS
+    "C:\\Windows\\Fonts\\arial.ttf",                                     # Windows
+]
 
-FONT_NAME = ImageFont.truetype(FONT_PATH, 34) if os.path.exists(FONT_PATH) else ImageFont.load_default()
+
+def _first_existing(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+FONT_PATH = _first_existing(BOLD_FONT_CANDIDATES)
+FONT_REGULAR = _first_existing(REGULAR_FONT_CANDIDATES)
+
+if FONT_PATH is None or FONT_REGULAR is None:
+    print(
+        "[make_it_quote] WARNING: no .ttf font found on this system. "
+        "Quote cards will use Pillow's tiny built-in font. "
+        "Fix this by placing Poppins-SemiBold.ttf and Poppins-Regular.ttf "
+        "(https://fonts.google.com/specimen/Poppins) next to this script."
+    )
+
+
+def load_font(path, size):
+    """Load a TrueType font at the requested size. Only falls back to
+    Pillow's non-scalable default font as an absolute last resort, and
+    tries to at least size that one too (Pillow >= 10.1)."""
+    if path:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            pass
+    try:
+        return ImageFont.load_default(size=size)  # Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()
+
+
+FONT_NAME = load_font(FONT_PATH, 34)
 
 # ---------------------------------------------------------------------------
 # INTENTS — message content intent MUST also be enabled in the Dev Portal
@@ -116,7 +167,7 @@ def build_quote_card(avatar_bytes: bytes, author_name: str, quote_text: str) -> 
     line_height = 0
     font = None
     while font_size >= 30:
-        font = ImageFont.truetype(FONT_PATH, font_size) if os.path.exists(FONT_PATH) else ImageFont.load_default()
+        font = load_font(FONT_PATH, font_size)
         lines = wrap_text(f"\u201c{quote_text}\u201d", font, max_text_width, draw)
 
         bbox = draw.textbbox((0, 0), "Ay", font=font)
@@ -136,7 +187,7 @@ def build_quote_card(avatar_bytes: bytes, author_name: str, quote_text: str) -> 
 
     # --- Fix 7: author name, right-aligned and consistently placed
     # under the quote block ---
-    name_font = ImageFont.truetype(FONT_REGULAR, 32) if os.path.exists(FONT_REGULAR) else ImageFont.load_default()
+    name_font = load_font(FONT_REGULAR, 32)
     name_text = f"— {author_name}"
     bbox = draw.textbbox((0, 0), name_text, font=name_font)
     name_width = bbox[2] - bbox[0]
