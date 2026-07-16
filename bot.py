@@ -79,8 +79,8 @@ _AUTO_FONTS = {
         "hinted/ttf/NotoSans/NotoSans-Regular.ttf"
     ),
     "NotoEmoji-Regular.ttf": (
-        "https://raw.githubusercontent.com/googlefonts/noto-emoji/main/"
-        "fonts/NotoEmoji-Regular.ttf"
+        "https://raw.githubusercontent.com/google/fonts/main/"
+        "ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf"
     ),
 }
 
@@ -136,22 +136,51 @@ FALLBACK_FONT_CANDIDATES = [
     os.path.join(SCRIPT_DIR, "NotoEmoji-Regular.ttf"),
     "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",               # Linux
     "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",              # Linux
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",                 # Linux (may render mono)
-    "/System/Library/Fonts/Apple Color Emoji.ttc",                       # macOS
-    "C:\\Windows\\Fonts\\seguiemj.ttf",                                  # Windows emoji
     "C:\\Windows\\Fonts\\segoeui.ttf",                                   # Windows wide-coverage
 ]
+# Deliberately NOT included: NotoColorEmoji.ttf, Apple Color Emoji.ttc,
+# seguiemj.ttf. Those are bitmap-strike (CBDT) or COLR color fonts —
+# freetype can only rasterize them at the fixed pixel sizes baked into
+# the file, so ImageFont.truetype(path, our_arbitrary_size) throws
+# "OSError: invalid pixel size" for almost every size we ask for. That
+# error used to get silently caught and fall back to Pillow's tiny
+# built-in font mid-render, which reported wildly wrong glyph widths
+# and threw off the line-wrapping math. NotoEmoji-Regular.ttf (outline,
+# not bitmap) is what actually renders emoji reliably at any size.
 
 
 def _first_existing(paths):
     for p in paths:
-        if os.path.exists(p):
+        if os.path.exists(p) and _font_is_usable(p):
             return p
     return None
 
 
 def _all_existing(paths):
-    return [p for p in paths if os.path.exists(p)]
+    return [p for p in paths if os.path.exists(p) and _font_is_usable(p)]
+
+
+_USABLE_FONT_CACHE = {}
+
+
+def _font_is_usable(path):
+    """Confirm Pillow can actually load this font file across the range
+    of sizes we render at. This is what catches bitmap/color emoji
+    fonts (or any other incompatible font) BEFORE they ever get added
+    to a chain, instead of discovering the failure mid-render."""
+    if path in _USABLE_FONT_CACHE:
+        return _USABLE_FONT_CACHE[path]
+    ok = True
+    for test_size in (22, 32, 62):
+        try:
+            ImageFont.truetype(path, test_size)
+        except Exception:
+            ok = False
+            break
+    _USABLE_FONT_CACHE[path] = ok
+    if not ok:
+        print(f"[make_it_quote] Skipping font (can't load at needed sizes): {path}")
+    return ok
 
 
 FONT_PATH = _first_existing(BOLD_FONT_CANDIDATES)
