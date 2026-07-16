@@ -427,7 +427,7 @@ def build_quote_card(avatar_bytes: bytes, author_name: str, quote_text: str) -> 
 
 @client.event
 async def on_ready():
-    print(f"Logged in as {client.user} — ready to make quotes.")
+    print(f"Logged in as {client.user} — ready to make quotes v5.")
 
 
 @client.event
