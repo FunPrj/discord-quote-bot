@@ -10,24 +10,39 @@ image back in the channel.
 (see README.md for free hosting options).
 
 Requirements: discord.py, Pillow, aiohttp, requests, fonttools
-    pip install -U discord.py Pillow aiohttp fonttools
+    pip install -U discord.py Pillow aiohttp requests fonttools
 
 Fonts:
     For best results, drop these files next to this script:
         Poppins-SemiBold.ttf   (headline / quote text)
         Poppins-Regular.ttf    (author name)
-        NotoSans-Regular.ttf   (fallback for accented / non-Latin scripts)
-        NotoEmoji-Regular.ttf  (fallback for emoji — monochrome; see note below)
-    (Poppins: https://fonts.google.com/specimen/Poppins,
-     Noto Sans / Noto Emoji: https://fonts.google.com/noto)
+    (Poppins: https://fonts.google.com/specimen/Poppins)
+
+    On first run, the bot automatically DOWNLOADS two wide-coverage
+    fallback fonts into this same folder if they aren't already there:
+        NotoSans-Regular.ttf   (accented Latin, Cyrillic, Greek, etc.)
+        NotoEmoji-Regular.ttf  (monochrome emoji outlines)
+    This is what makes non-English text and emoji actually render
+    instead of showing blank boxes. If your bot host has no outbound
+    internet access, download them yourself from
+    https://github.com/notofonts/noto-fonts and
+    https://github.com/googlefonts/noto-emoji and place them next to
+    this script — the bot will use the local copies and skip downloading.
 
     NOTE ON EMOJI: Pillow can only reliably render *monochrome* emoji
     glyphs unless your local libfreetype build was compiled with color
-    bitmap/CBDT support (most pip-installed Pillow wheels are NOT).
-    "NotoEmoji-Regular.ttf" (the outline/mono version, not
-    "NotoColorEmoji.ttf") will render on any system. If you need full
-    color emoji, you'd need to composite pre-rendered emoji PNGs
-    (e.g. Twemoji) on top of the text instead of drawing glyphs.
+    bitmap/CBDT support (most pip-installed Pillow wheels are NOT), so
+    we use the monochrome "NotoEmoji-Regular.ttf" rather than
+    "NotoColorEmoji.ttf". If you need full color emoji, you'd need to
+    composite pre-rendered emoji PNGs (e.g. Twemoji) on top of the text
+    instead of drawing glyphs.
+
+    NOTE ON CJK / ARABIC / DEVANAGARI ETC.: NotoSans-Regular.ttf only
+    covers Latin/Cyrillic/Greek-family scripts. If you need Chinese,
+    Japanese, Korean, Arabic, or other scripts, download the matching
+    Noto font (e.g. "Noto Sans SC", "Noto Sans Arabic") and add its
+    path to FALLBACK_FONT_CANDIDATES below — the glyph-picking logic
+    will automatically pick it up per-character.
 """
 
 import io
@@ -35,6 +50,7 @@ import os
 
 import aiohttp
 import discord
+import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ---------------------------------------------------------------------------
@@ -48,6 +64,49 @@ CARD_HEIGHT = 675
 AVATAR_SIZE = 675  # avatar takes the left square, text sits on the right
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------------------
+# AUTO-DOWNLOAD WIDE-COVERAGE FALLBACK FONTS
+# ---------------------------------------------------------------------------
+# These are the two files that actually make emoji / accented / non-Latin
+# text render instead of showing blank tofu boxes. Most people never
+# manually download and place them next to the script, so we fetch them
+# automatically the first time the bot starts (best-effort — if there's
+# no internet access, we just skip and fall back to system fonts).
+_AUTO_FONTS = {
+    "NotoSans-Regular.ttf": (
+        "https://raw.githubusercontent.com/notofonts/noto-fonts/main/"
+        "hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+    ),
+    "NotoEmoji-Regular.ttf": (
+        "https://raw.githubusercontent.com/googlefonts/noto-emoji/main/"
+        "fonts/NotoEmoji-Regular.ttf"
+    ),
+}
+
+
+def _ensure_fallback_fonts():
+    for filename, url in _AUTO_FONTS.items():
+        dest = os.path.join(SCRIPT_DIR, filename)
+        if os.path.exists(dest):
+            continue
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            tmp = dest + ".part"
+            with open(tmp, "wb") as f:
+                f.write(resp.content)
+            os.replace(tmp, dest)
+            print(f"[make_it_quote] Downloaded fallback font: {filename}")
+        except Exception as exc:
+            print(
+                f"[make_it_quote] Could not auto-download {filename} ({exc}). "
+                "Emoji/unicode coverage may be limited unless you place it "
+                "next to this script manually."
+            )
+
+
+_ensure_fallback_fonts()
 
 # Every place we'll look for a real, scalable .ttf, in priority order.
 # These are the "primary" display fonts (used first for any glyph they contain).
@@ -69,10 +128,9 @@ REGULAR_FONT_CANDIDATES = [
 ]
 
 # Fallback fonts used ONLY for characters the primary font doesn't contain
-# (wide-coverage Latin/Cyrillic/Greek/etc + emoji). None of these are
-# required — if they're missing, unsupported characters just fall back to
-# whatever font is found first, which may still show a "tofu" box, but
-# rendering will no longer silently break.
+# (wide-coverage Latin/Cyrillic/Greek/etc + emoji). The two Noto files are
+# auto-downloaded above if missing. Add more Noto script fonts here (e.g.
+# Noto Sans SC/JP/KR/Arabic) if you need those scripts.
 FALLBACK_FONT_CANDIDATES = [
     os.path.join(SCRIPT_DIR, "NotoSans-Regular.ttf"),
     os.path.join(SCRIPT_DIR, "NotoEmoji-Regular.ttf"),
@@ -142,7 +200,11 @@ def _load_default(size):
 
 def get_font_cmap(path):
     """Return the set of unicode codepoints a font file actually contains,
-    so we can decide whether it can render a given character at all."""
+    so we can decide whether it can render a given character at all.
+    Returns None if we couldn't determine this (fonttools missing, or an
+    unreadable/variable font) — callers must NOT treat that as "supports
+    everything", or every character silently gets stuck on the first font
+    in the chain and never reaches the emoji/unicode fallback fonts."""
     if path is None:
         return set()
     if path in _FONT_CMAP_CACHE:
@@ -155,23 +217,36 @@ def get_font_cmap(path):
         cmap = tt.getBestCmap()
         if cmap:
             codepoints = set(cmap.keys())
+        else:
+            codepoints = None
     except Exception:
-        # fonttools missing, or an unreadable/variable font — just treat
-        # this font as "supports everything" so it's still used rather
-        # than skipped entirely.
         codepoints = None
     _FONT_CMAP_CACHE[path] = codepoints
     return codepoints
 
 
 def pick_font_path(ch, chain):
-    """Pick the first font in `chain` that contains a glyph for `ch`."""
+    """Pick the first font in `chain` that's *confirmed* (via cmap) to
+    contain a glyph for `ch`. Fonts whose cmap we couldn't read are kept
+    as a last-resort fallback rather than being assumed to support the
+    character — this is what lets emoji / accented / non-Latin
+    characters actually fall through to NotoSans / NotoEmoji instead of
+    getting stuck on the primary font and rendering as a blank box."""
     if ch.isspace():
         return chain[0] if chain else None
+
+    unknown_cmap_fallback = None
     for path in chain:
         cmap = get_font_cmap(path)
-        if cmap is None or ord(ch) in cmap:
+        if cmap is None:
+            if unknown_cmap_fallback is None:
+                unknown_cmap_fallback = path
+            continue
+        if ord(ch) in cmap:
             return path
+
+    if unknown_cmap_fallback is not None:
+        return unknown_cmap_fallback
     # Nothing in the chain claims to support it — use the first font
     # anyway (best effort; may show a tofu box, but won't crash).
     return chain[0] if chain else None
@@ -302,13 +377,13 @@ def build_quote_card(avatar_bytes: bytes, author_name: str, quote_text: str) -> 
         draw_mixed_text(draw, (text_x, y), line, BOLD_CHAIN, font_size, "white")
         y += line_height
 
-    # --- author name, right-aligned and placed under the quote block ---
+    # --- author name, centered under the quote block ---
     name_size = 32
     name_text = f"— {author_name}"
     name_width = text_run_width(name_text, REGULAR_CHAIN, name_size, draw)
     draw_mixed_text(
         draw,
-        (text_x + max_text_width - name_width, y + 30),
+        (text_x + (max_text_width - name_width) / 2, y + 30),
         name_text,
         REGULAR_CHAIN,
         name_size,
